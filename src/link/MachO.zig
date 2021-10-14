@@ -5200,8 +5200,29 @@ fn snapshotState(self: *MachO) !void {
             undefs: []Symbol,
         };
 
+        const ResolverEntry = struct {
+            name: []const u8,
+            where: enum {
+                global,
+                undef,
+
+                pub fn jsonStringify(value: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
+                    _ = options;
+                    switch (value) {
+                        .global => try out_stream.writeAll("\"global\""),
+                        .undef => try out_stream.writeAll("\"undef\""),
+                    }
+                }
+            },
+            where_index: u32,
+            local_sym_index: u32,
+            file: i32,
+        };
+
         timestamp: i128,
+        objects: [][]const u8,
         symtab: Symtab,
+        resolver: []ResolverEntry,
     };
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -5232,12 +5253,22 @@ fn snapshotState(self: *MachO) !void {
 
     var snapshot = Snapshot{
         .timestamp = timestamp,
+        .objects = undefined,
         .symtab = .{
             .locals = undefined,
             .globals = undefined,
             .undefs = undefined,
         },
+        .resolver = undefined,
     };
+
+    // Snapshot state of objects table
+    var objects = std.ArrayList([]const u8).init(arena);
+    try objects.ensureTotalCapacity(self.objects.items.len);
+    for (self.objects.items) |object| {
+        objects.appendAssumeCapacity(object.name);
+    }
+    snapshot.objects = objects.toOwnedSlice();
 
     // Snapshot state of the symbol table
     var locals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
@@ -5278,6 +5309,28 @@ fn snapshotState(self: *MachO) !void {
         });
     }
     snapshot.symtab.undefs = undefs.toOwnedSlice();
+
+    // Snapshot state of the symbol resolver
+    var resolver = std.ArrayList(Snapshot.ResolverEntry).init(arena);
+    try resolver.ensureTotalCapacity(self.symbol_resolver.count());
+    {
+        var it = self.symbol_resolver.iterator();
+        while (it.next()) |entry| {
+            const name = try arena.dupe(u8, self.getString(entry.key_ptr.*));
+            const value = entry.value_ptr.*;
+            resolver.appendAssumeCapacity(.{
+                .name = name,
+                .where = switch (value.where) {
+                    .global => .global,
+                    .undef => .undef,
+                },
+                .where_index = value.where_index,
+                .local_sym_index = value.local_sym_index,
+                .file = value.file orelse -1,
+            });
+        }
+    }
+    snapshot.resolver = resolver.toOwnedSlice();
 
     try std.json.stringify(snapshot, .{}, out_file.writer());
 }
