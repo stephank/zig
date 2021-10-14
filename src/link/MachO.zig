@@ -821,8 +821,7 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
             sect.offset = self.tlv_bss_file_offset;
         }
 
-        for (self.objects.items) |*object, object_id| {
-            if (object.analyzed) continue;
+        for (self.objects.items) |_, object_id| {
             try self.resolveSymbolsInObject(@intCast(u16, object_id));
         }
 
@@ -2687,8 +2686,6 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
     defer section_metadata.deinit();
 
     for (self.objects.items) |*object| {
-        if (object.analyzed) continue;
-
         try object.parseIntoAtoms(self.base.allocator, self);
 
         var it = object.end_atoms.iterator();
@@ -2734,8 +2731,6 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
                 try first_atoms.putNoClobber(match, atom);
             }
         }
-
-        object.analyzed = true;
     }
 
     var it = section_metadata.iterator();
