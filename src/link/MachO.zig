@@ -5193,6 +5193,12 @@ fn snapshotState(self: *MachO) !void {
     };
 
     const Snapshot = struct {
+        const Section = struct {
+            name: []const u8,
+            address: u64,
+            size: u64,
+        };
+
         const Symtab = struct {
             const Symbol = struct {
                 name: []const u8,
@@ -5231,6 +5237,7 @@ fn snapshotState(self: *MachO) !void {
 
         timestamp: i128,
         objects: [][]const u8,
+        sections: []Section,
         symtab: Symtab,
         resolver: []ResolverEntry,
         got_entries: []GotEntry,
@@ -5265,6 +5272,7 @@ fn snapshotState(self: *MachO) !void {
     var snapshot = Snapshot{
         .timestamp = timestamp,
         .objects = undefined,
+        .sections = undefined,
         .symtab = .{
             .locals = undefined,
             .globals = undefined,
@@ -5282,6 +5290,26 @@ fn snapshotState(self: *MachO) !void {
     }
     snapshot.objects = objects.toOwnedSlice();
 
+    // Snapshot state of the sections
+    var sections = std.ArrayList(Snapshot.Section).init(arena);
+    for (self.load_commands.items) |lc| {
+        if (lc != .Segment) break;
+        const seg = lc.Segment;
+        try sections.ensureUnusedCapacity(seg.sections.items.len);
+
+        for (seg.sections.items) |sect| {
+            sections.appendAssumeCapacity(.{
+                .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
+                    commands.segmentName(sect),
+                    commands.sectionName(sect),
+                }),
+                .address = sect.addr,
+                .size = sect.size,
+            });
+        }
+    }
+    snapshot.sections = sections.toOwnedSlice();
+
     // Snapshot state of the symbol table
     var locals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
     var globals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
@@ -5290,9 +5318,8 @@ fn snapshotState(self: *MachO) !void {
     try locals.ensureTotalCapacity(self.locals.items.len);
     for (self.locals.items) |sym| {
         if (sym.n_strx == 0) continue;
-        const name = try arena.dupe(u8, self.getString(sym.n_strx));
         locals.appendAssumeCapacity(.{
-            .name = name,
+            .name = self.getString(sym.n_strx),
             .address = sym.n_value,
             .section = if (sym.n_sect > 0) sym.n_sect - 1 else 0,
         });
@@ -5301,9 +5328,8 @@ fn snapshotState(self: *MachO) !void {
 
     try globals.ensureTotalCapacity(self.globals.items.len);
     for (self.globals.items) |sym| {
-        const name = try arena.dupe(u8, self.getString(sym.n_strx));
         globals.appendAssumeCapacity(.{
-            .name = name,
+            .name = self.getString(sym.n_strx),
             .address = sym.n_value,
             .section = sym.n_sect - 1,
         });
@@ -5313,9 +5339,8 @@ fn snapshotState(self: *MachO) !void {
     try undefs.ensureTotalCapacity(self.undefs.items.len);
     for (self.undefs.items) |sym| {
         if (sym.n_strx == 0) continue;
-        const name = try arena.dupe(u8, self.getString(sym.n_strx));
         undefs.appendAssumeCapacity(.{
-            .name = name,
+            .name = self.getString(sym.n_strx),
             .address = sym.n_value,
             .section = 0,
         });
@@ -5328,10 +5353,9 @@ fn snapshotState(self: *MachO) !void {
     {
         var it = self.symbol_resolver.iterator();
         while (it.next()) |entry| {
-            const name = try arena.dupe(u8, self.getString(entry.key_ptr.*));
             const value = entry.value_ptr.*;
             resolver.appendAssumeCapacity(.{
-                .name = name,
+                .name = self.getString(entry.key_ptr.*),
                 .where = switch (value.where) {
                     .global => .global,
                     .undef => .undef,
