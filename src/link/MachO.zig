@@ -888,6 +888,7 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
         }
 
         try self.flushModule(comp);
+        try self.snapshotState();
     }
 
     cache: {
@@ -5167,4 +5168,90 @@ pub fn findFirst(comptime T: type, haystack: []T, start: usize, predicate: anyty
         if (predicate.predicate(haystack[i])) break;
     }
     return i;
+}
+
+fn snapshotState(self: *MachO) !void {
+    const emit = self.base.options.emit orelse {
+        log.debug("no emit directory found; skipping snapshot...", .{});
+        return;
+    };
+
+    const Snapshot = struct {
+        const Symtab = struct {
+            const Symbol = struct {
+                name: []const u8,
+                address: u64,
+                section: u8,
+            };
+
+            locals: []Symbol,
+            globals: []Symbol,
+            undefs: []Symbol,
+        };
+
+        timestamp: i128,
+        symtab: Symtab,
+    };
+
+    var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
+    defer arena_allocator.deinit();
+    const arena = &arena_allocator.allocator;
+
+    const timestamp = std.time.nanoTimestamp();
+    const sub_path = try std.fmt.allocPrint(arena, "snapshot_{d}.json", .{timestamp});
+    const out_file = try emit.directory.handle.createFile(sub_path, .{
+        .truncate = true,
+        .read = true,
+    });
+    defer out_file.close();
+
+    var snapshot = Snapshot{
+        .timestamp = timestamp,
+        .symtab = .{
+            .locals = undefined,
+            .globals = undefined,
+            .undefs = undefined,
+        },
+    };
+
+    // Snapshot state of the symbol table
+    var locals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
+    var globals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
+    var undefs = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
+
+    try locals.ensureTotalCapacity(self.locals.items.len);
+    for (self.locals.items) |sym| {
+        if (sym.n_strx == 0) continue;
+        const name = try arena.dupe(u8, self.getString(sym.n_strx));
+        locals.appendAssumeCapacity(.{
+            .name = name,
+            .address = sym.n_value,
+            .section = sym.n_sect - 1,
+        });
+    }
+    snapshot.symtab.locals = locals.toOwnedSlice();
+
+    try globals.ensureTotalCapacity(self.globals.items.len);
+    for (self.globals.items) |sym| {
+        const name = try arena.dupe(u8, self.getString(sym.n_strx));
+        globals.appendAssumeCapacity(.{
+            .name = name,
+            .address = sym.n_value,
+            .section = sym.n_sect - 1,
+        });
+    }
+    snapshot.symtab.globals = globals.toOwnedSlice();
+
+    try undefs.ensureTotalCapacity(self.undefs.items.len);
+    for (self.undefs.items) |sym| {
+        const name = try arena.dupe(u8, self.getString(sym.n_strx));
+        undefs.appendAssumeCapacity(.{
+            .name = name,
+            .address = sym.n_value,
+            .section = 0,
+        });
+    }
+    snapshot.symtab.undefs = undefs.toOwnedSlice();
+
+    try std.json.stringify(snapshot, .{}, out_file.writer());
 }

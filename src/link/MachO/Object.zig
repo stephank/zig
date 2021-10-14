@@ -458,15 +458,9 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
         // a temp one, unless we already did that when working out the relocations
         // of other atoms.
         const atom_local_sym_index = self.sections_as_symbols.get(sect_id) orelse blk: {
-            const sym_name = try std.fmt.allocPrint(allocator, "{s}_{s}_{s}", .{
-                self.name,
-                segmentName(sect),
-                sectionName(sect),
-            });
-            defer allocator.free(sym_name);
             const atom_local_sym_index = @intCast(u32, macho_file.locals.items.len);
             try macho_file.locals.append(allocator, .{
-                .n_strx = try macho_file.makeString(sym_name),
+                .n_strx = 0,
                 .n_type = macho.N_SECT,
                 .n_sect = @intCast(u8, macho_file.section_ordinals.getIndex(match).? + 1),
                 .n_desc = 0,
