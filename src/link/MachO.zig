@@ -821,7 +821,8 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
             sect.offset = self.tlv_bss_file_offset;
         }
 
-        for (self.objects.items) |_, object_id| {
+        for (self.objects.items) |*object, object_id| {
+            if (object.analyzed) continue;
             try self.resolveSymbolsInObject(@intCast(u16, object_id));
         }
 
@@ -2694,6 +2695,8 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
     defer section_metadata.deinit();
 
     for (self.objects.items) |*object| {
+        if (object.analyzed) continue;
+
         try object.parseIntoAtoms(self.base.allocator, self);
 
         var it = object.end_atoms.iterator();
@@ -2739,6 +2742,8 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
                 try first_atoms.putNoClobber(match, atom);
             }
         }
+
+        object.analyzed = true;
     }
 
     var it = section_metadata.iterator();
@@ -5219,10 +5224,16 @@ fn snapshotState(self: *MachO) !void {
             file: i32,
         };
 
+        const GotEntry = struct {
+            address: u64,
+            pointer: u64,
+        };
+
         timestamp: i128,
         objects: [][]const u8,
         symtab: Symtab,
         resolver: []ResolverEntry,
+        got_entries: []GotEntry,
     };
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -5260,6 +5271,7 @@ fn snapshotState(self: *MachO) !void {
             .undefs = undefined,
         },
         .resolver = undefined,
+        .got_entries = undefined,
     };
 
     // Snapshot state of objects table
@@ -5282,7 +5294,7 @@ fn snapshotState(self: *MachO) !void {
         locals.appendAssumeCapacity(.{
             .name = name,
             .address = sym.n_value,
-            .section = sym.n_sect - 1,
+            .section = if (sym.n_sect > 0) sym.n_sect - 1 else 0,
         });
     }
     snapshot.symtab.locals = locals.toOwnedSlice();
@@ -5331,6 +5343,29 @@ fn snapshotState(self: *MachO) !void {
         }
     }
     snapshot.resolver = resolver.toOwnedSlice();
+
+    // Snapshot state of the GOT
+    var got_entries = std.ArrayList(Snapshot.GotEntry).init(arena);
+    try got_entries.ensureTotalCapacity(self.got_entries_map.count());
+    for (self.got_entries_map.keys()) |target| {
+        const atom = self.got_entries_map.get(target).?;
+        const sym = self.locals.items[atom.local_sym_index];
+        const pointer = switch (target) {
+            .local => |id| self.locals.items[id].n_value,
+            .global => |n_strx| blk: {
+                const resolv = self.symbol_resolver.get(n_strx).?;
+                break :blk switch (resolv.where) {
+                    .global => self.globals.items[resolv.where_index].n_value,
+                    .undef => 0,
+                };
+            },
+        };
+        got_entries.appendAssumeCapacity(.{
+            .address = sym.n_value,
+            .pointer = pointer,
+        });
+    }
+    snapshot.got_entries = got_entries.toOwnedSlice();
 
     try std.json.stringify(snapshot, .{}, out_file.writer());
 }

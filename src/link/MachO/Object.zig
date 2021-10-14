@@ -64,6 +64,8 @@ sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 symbol_mapping: std.AutoHashMapUnmanaged(u32, u32) = .{},
 reverse_symbol_mapping: std.AutoHashMapUnmanaged(u32, u32) = .{},
 
+analyzed: bool = false,
+
 const DebugInfo = struct {
     inner: dwarf.DwarfInfo,
     debug_info: []u8,
@@ -172,7 +174,13 @@ pub fn free(self: *Object, allocator: *Allocator, macho_file: *MachO) void {
             if (atom.local_sym_index != 0) {
                 macho_file.locals_free_list.append(allocator, atom.local_sym_index) catch {};
                 const local = &macho_file.locals.items[atom.local_sym_index];
-                local.n_type = 0;
+                local.* = .{
+                    .n_strx = 0,
+                    .n_type = 0,
+                    .n_sect = 0,
+                    .n_desc = 0,
+                    .n_value = 0,
+                };
                 atom.local_sym_index = 0;
             }
             if (atom == last_atom) {
