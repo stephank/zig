@@ -5230,9 +5230,15 @@ fn snapshotState(self: *MachO) !void {
             file: i32,
         };
 
-        const GotEntry = struct {
-            address: u64,
-            pointer: u64,
+        const Node = struct {
+            const Link = struct {
+                source_address: u64,
+                target_address: u64,
+            };
+
+            base_address: u64,
+            section: u8,
+            links: []Link,
         };
 
         timestamp: i128,
@@ -5240,7 +5246,7 @@ fn snapshotState(self: *MachO) !void {
         sections: []Section,
         symtab: Symtab,
         resolver: []ResolverEntry,
-        got_entries: []GotEntry,
+        nodes: []Node,
     };
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -5279,7 +5285,7 @@ fn snapshotState(self: *MachO) !void {
             .undefs = undefined,
         },
         .resolver = undefined,
-        .got_entries = undefined,
+        .nodes = undefined,
     };
 
     // Snapshot state of objects table
@@ -5368,28 +5374,96 @@ fn snapshotState(self: *MachO) !void {
     }
     snapshot.resolver = resolver.toOwnedSlice();
 
-    // Snapshot state of the GOT
-    var got_entries = std.ArrayList(Snapshot.GotEntry).init(arena);
-    try got_entries.ensureTotalCapacity(self.got_entries_map.count());
-    for (self.got_entries_map.keys()) |target| {
-        const atom = self.got_entries_map.get(target).?;
-        const sym = self.locals.items[atom.local_sym_index];
-        const pointer = switch (target) {
-            .local => |id| self.locals.items[id].n_value,
-            .global => |n_strx| blk: {
-                const resolv = self.symbol_resolver.get(n_strx).?;
-                break :blk switch (resolv.where) {
-                    .global => self.globals.items[resolv.where_index].n_value,
-                    .undef => 0,
-                };
-            },
-        };
-        got_entries.appendAssumeCapacity(.{
-            .address = sym.n_value,
-            .pointer = pointer,
-        });
+    // Snapshot nodes and links between them
+    var nodes = std.ArrayList(Snapshot.Node).init(arena);
+    {
+        var it = self.atoms.iterator();
+        while (it.next()) |entry| {
+            const section = @intCast(u8, self.section_ordinals.getIndex(entry.key_ptr.*).?);
+            var atom: *Atom = entry.value_ptr.*;
+            while (true) {
+                var links = std.ArrayList(Snapshot.Node.Link).init(arena);
+                try links.ensureTotalCapacity(atom.relocs.items.len);
+                for (atom.relocs.items) |rel| {
+                    const arch = self.base.options.target.cpu.arch;
+                    const source_addr = blk: {
+                        const sym = self.locals.items[atom.local_sym_index];
+                        break :blk sym.n_value + rel.offset;
+                    };
+                    const target_addr = blk: {
+                        const is_via_got = got: {
+                            switch (arch) {
+                                .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.@"type")) {
+                                    .ARM64_RELOC_GOT_LOAD_PAGE21, .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => true,
+                                    else => false,
+                                },
+                                .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, rel.@"type")) {
+                                    .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
+                                    else => false,
+                                },
+                                else => unreachable,
+                            }
+                        };
+
+                        if (is_via_got) {
+                            const got_atom = self.got_entries_map.get(rel.target).?;
+                            break :blk self.locals.items[got_atom.local_sym_index].n_value;
+                        }
+
+                        switch (rel.target) {
+                            .local => |sym_index| {
+                                const sym = self.locals.items[sym_index];
+                                const is_tlv = is_tlv: {
+                                    const source_sym = self.locals.items[atom.local_sym_index];
+                                    const match = self.section_ordinals.keys()[source_sym.n_sect - 1];
+                                    const seg = self.load_commands.items[match.seg].Segment;
+                                    const sect = seg.sections.items[match.sect];
+                                    break :is_tlv commands.sectionType(sect) == macho.S_THREAD_LOCAL_VARIABLES;
+                                };
+                                if (is_tlv) {
+                                    const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                    const base_address = inner: {
+                                        if (self.tlv_data_section_index) |i| {
+                                            break :inner seg.sections.items[i].addr;
+                                        } else if (self.tlv_bss_section_index) |i| {
+                                            break :inner seg.sections.items[i].addr;
+                                        } else unreachable;
+                                    };
+                                    break :blk sym.n_value - base_address;
+                                }
+                                break :blk sym.n_value;
+                            },
+                            .global => |n_strx| {
+                                const resolv = self.symbol_resolver.get(n_strx).?;
+                                switch (resolv.where) {
+                                    .global => break :blk self.globals.items[resolv.where_index].n_value,
+                                    .undef => {
+                                        break :blk if (self.stubs_map.get(n_strx)) |stub_atom|
+                                            self.locals.items[stub_atom.local_sym_index].n_value
+                                        else
+                                            0;
+                                    },
+                                }
+                            },
+                        }
+                    };
+                    links.appendAssumeCapacity(.{
+                        .source_address = source_addr,
+                        .target_address = target_addr,
+                    });
+                }
+                try nodes.append(.{
+                    .base_address = self.locals.items[atom.local_sym_index].n_value,
+                    .section = section,
+                    .links = links.toOwnedSlice(),
+                });
+                if (atom.prev) |prev| {
+                    atom = prev;
+                } else break;
+            }
+        }
     }
-    snapshot.got_entries = got_entries.toOwnedSlice();
+    snapshot.nodes = nodes.toOwnedSlice();
 
     try std.json.stringify(snapshot, .{}, out_file.writer());
 }
