@@ -92,8 +92,30 @@ pub fn main() !void {
             std.debug.warn("---------------  {x}\n", .{section.address});
 
             for (section.nodes) |node| {
-                std.debug.print("...............  {x}\n", .{node.address});
-                std.debug.print("...............  {x}\n", .{node.address + node.size});
+                var symbols = std.AutoHashMap(u64, Snapshot.Symtab.Symbol).init(arena);
+
+                for (snapshot.symtab.globals) |sym| {
+                    if (node.address <= sym.address and sym.address < node.address + node.size) {
+                        if (symbols.contains(sym.address)) continue;
+                        try symbols.putNoClobber(sym.address, sym);
+                    }
+                }
+
+                for (snapshot.symtab.locals) |sym| {
+                    if (node.address <= sym.address and sym.address < node.address + node.size) {
+                        if (symbols.contains(sym.address)) continue;
+                        try symbols.putNoClobber(sym.address, sym);
+                    }
+                }
+
+                std.debug.print("  .............  {x}\n", .{node.address});
+
+                var it = symbols.valueIterator();
+                while (it.next()) |sym| {
+                    std.debug.print("    {s}  {x}\n", .{ sym.name, sym.address });
+                }
+
+                std.debug.print("  .............  {x}\n", .{node.address + node.size});
             }
 
             std.debug.warn("---------------  {x}\n\n", .{section.address + section.size});
