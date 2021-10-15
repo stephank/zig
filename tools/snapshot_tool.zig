@@ -87,6 +87,8 @@ pub fn main() !void {
     defer std.json.parseFree([]Snapshot, snapshots, opts);
 
     for (snapshots) |snapshot| {
+        std.debug.warn("Snapshot {d}\n", .{snapshot.timestamp});
+
         for (snapshot.sections) |section| {
             std.debug.warn("{s}\n", .{section.name});
             std.debug.warn("---------------  {x}\n", .{section.address});
@@ -120,6 +122,8 @@ pub fn main() !void {
 
             std.debug.warn("---------------  {x}\n\n", .{section.address + section.size});
         }
+
+        std.debug.warn("\n", .{});
     }
 }
 

@@ -5350,116 +5350,121 @@ fn snapshotState(self: *MachO) !void {
 
     // Snapshot sections, nodes and links between them
     var sections = std.ArrayList(Snapshot.Section).init(arena);
-    try sections.ensureTotalCapacity(self.atoms.count());
-    {
-        var it = self.atoms.iterator();
-        while (it.next()) |entry| {
-            var section = blk: {
-                const match = entry.key_ptr.*;
-                const seg = self.load_commands.items[match.seg].Segment;
-                const sect = seg.sections.items[match.sect];
-                break :blk Snapshot.Section{
-                    .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
-                        commands.segmentName(sect),
-                        commands.sectionName(sect),
-                    }),
-                    .address = sect.addr,
-                    .size = sect.size,
-                    .nodes = undefined,
-                };
+    try sections.ensureTotalCapacity(self.section_ordinals.count());
+
+    for (self.section_ordinals.keys()) |key| {
+        var section = blk: {
+            const seg = self.load_commands.items[key.seg].Segment;
+            const sect = seg.sections.items[key.sect];
+            break :blk Snapshot.Section{
+                .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
+                    commands.segmentName(sect),
+                    commands.sectionName(sect),
+                }),
+                .address = sect.addr,
+                .size = sect.size,
+                .nodes = undefined,
             };
+        };
 
-            var nodes = std.ArrayList(Snapshot.Node).init(arena);
-            var atom: *Atom = entry.value_ptr.*;
+        var nodes = std.ArrayList(Snapshot.Node).init(arena);
+        var atom: *Atom = self.atoms.get(key) orelse {
+            section.nodes = &[0]Snapshot.Node{};
+            sections.appendAssumeCapacity(section);
+            continue;
+        };
 
-            while (true) {
-                var links = std.ArrayList(Snapshot.Node.Link).init(arena);
-                try links.ensureTotalCapacity(atom.relocs.items.len);
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
 
-                for (atom.relocs.items) |rel| {
-                    const arch = self.base.options.target.cpu.arch;
-                    const source_addr = blk: {
-                        const sym = self.locals.items[atom.local_sym_index];
-                        break :blk sym.n_value + rel.offset;
-                    };
-                    const target_addr = blk: {
-                        const is_via_got = got: {
-                            switch (arch) {
-                                .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.@"type")) {
-                                    .ARM64_RELOC_GOT_LOAD_PAGE21, .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => true,
-                                    else => false,
-                                },
-                                .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, rel.@"type")) {
-                                    .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
-                                    else => false,
-                                },
-                                else => unreachable,
-                            }
-                        };
+        while (true) {
+            var links = std.ArrayList(Snapshot.Node.Link).init(arena);
+            try links.ensureTotalCapacity(atom.relocs.items.len);
 
-                        if (is_via_got) {
-                            const got_atom = self.got_entries_map.get(rel.target).?;
-                            break :blk self.locals.items[got_atom.local_sym_index].n_value;
+            for (atom.relocs.items) |rel| {
+                const arch = self.base.options.target.cpu.arch;
+                const source_addr = blk: {
+                    const sym = self.locals.items[atom.local_sym_index];
+                    break :blk sym.n_value + rel.offset;
+                };
+                const target_addr = blk: {
+                    const is_via_got = got: {
+                        switch (arch) {
+                            .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.@"type")) {
+                                .ARM64_RELOC_GOT_LOAD_PAGE21, .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => true,
+                                else => false,
+                            },
+                            .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, rel.@"type")) {
+                                .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
+                                else => false,
+                            },
+                            else => unreachable,
                         }
+                    };
 
-                        switch (rel.target) {
-                            .local => |sym_index| {
-                                const sym = self.locals.items[sym_index];
-                                const is_tlv = is_tlv: {
-                                    const source_sym = self.locals.items[atom.local_sym_index];
-                                    const match = self.section_ordinals.keys()[source_sym.n_sect - 1];
-                                    const seg = self.load_commands.items[match.seg].Segment;
-                                    const sect = seg.sections.items[match.sect];
-                                    break :is_tlv commands.sectionType(sect) == macho.S_THREAD_LOCAL_VARIABLES;
+                    if (is_via_got) {
+                        const got_atom = self.got_entries_map.get(rel.target).?;
+                        break :blk self.locals.items[got_atom.local_sym_index].n_value;
+                    }
+
+                    switch (rel.target) {
+                        .local => |sym_index| {
+                            const sym = self.locals.items[sym_index];
+                            const is_tlv = is_tlv: {
+                                const source_sym = self.locals.items[atom.local_sym_index];
+                                const match = self.section_ordinals.keys()[source_sym.n_sect - 1];
+                                const seg = self.load_commands.items[match.seg].Segment;
+                                const sect = seg.sections.items[match.sect];
+                                break :is_tlv commands.sectionType(sect) == macho.S_THREAD_LOCAL_VARIABLES;
+                            };
+                            if (is_tlv) {
+                                const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                const base_address = inner: {
+                                    if (self.tlv_data_section_index) |i| {
+                                        break :inner seg.sections.items[i].addr;
+                                    } else if (self.tlv_bss_section_index) |i| {
+                                        break :inner seg.sections.items[i].addr;
+                                    } else unreachable;
                                 };
-                                if (is_tlv) {
-                                    const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-                                    const base_address = inner: {
-                                        if (self.tlv_data_section_index) |i| {
-                                            break :inner seg.sections.items[i].addr;
-                                        } else if (self.tlv_bss_section_index) |i| {
-                                            break :inner seg.sections.items[i].addr;
-                                        } else unreachable;
-                                    };
-                                    break :blk sym.n_value - base_address;
-                                }
-                                break :blk sym.n_value;
-                            },
-                            .global => |n_strx| {
-                                const resolv = self.symbol_resolver.get(n_strx).?;
-                                switch (resolv.where) {
-                                    .global => break :blk self.globals.items[resolv.where_index].n_value,
-                                    .undef => {
-                                        break :blk if (self.stubs_map.get(n_strx)) |stub_atom|
-                                            self.locals.items[stub_atom.local_sym_index].n_value
-                                        else
-                                            0;
-                                    },
-                                }
-                            },
-                        }
-                    };
+                                break :blk sym.n_value - base_address;
+                            }
+                            break :blk sym.n_value;
+                        },
+                        .global => |n_strx| {
+                            const resolv = self.symbol_resolver.get(n_strx).?;
+                            switch (resolv.where) {
+                                .global => break :blk self.globals.items[resolv.where_index].n_value,
+                                .undef => {
+                                    break :blk if (self.stubs_map.get(n_strx)) |stub_atom|
+                                        self.locals.items[stub_atom.local_sym_index].n_value
+                                    else
+                                        0;
+                                },
+                            }
+                        },
+                    }
+                };
 
-                    links.appendAssumeCapacity(.{
-                        .source_address = source_addr,
-                        .target_address = target_addr,
-                    });
-                }
-
-                try nodes.append(.{
-                    .address = self.locals.items[atom.local_sym_index].n_value,
-                    .size = atom.size,
-                    .links = links.toOwnedSlice(),
+                links.appendAssumeCapacity(.{
+                    .source_address = source_addr,
+                    .target_address = target_addr,
                 });
-
-                if (atom.prev) |prev| {
-                    atom = prev;
-                } else break;
             }
 
-            section.nodes = nodes.toOwnedSlice();
-            sections.appendAssumeCapacity(section);
+            try nodes.append(.{
+                .address = self.locals.items[atom.local_sym_index].n_value,
+                .size = atom.size,
+                .links = links.toOwnedSlice(),
+            });
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
         }
+
+        section.nodes = nodes.toOwnedSlice();
+        sections.appendAssumeCapacity(section);
     }
     snapshot.sections = sections.toOwnedSlice();
 
