@@ -9,6 +9,18 @@ const Snapshot = struct {
         name: []const u8,
         address: u64,
         size: u64,
+        nodes: []Node,
+    };
+
+    const Node = struct {
+        const Link = struct {
+            source_address: u64,
+            target_address: u64,
+        };
+
+        address: u64,
+        size: u64,
+        links: []Link,
     };
 
     const Symtab = struct {
@@ -42,24 +54,11 @@ const Snapshot = struct {
         file: i32,
     };
 
-    const Node = struct {
-        const Link = struct {
-            source_address: u64,
-            target_address: u64,
-        };
-
-        address: u64,
-        size: u64,
-        section: u8,
-        links: []Link,
-    };
-
     timestamp: i128,
     objects: [][]const u8,
     sections: []Section,
     symtab: Symtab,
     resolver: []ResolverEntry,
-    nodes: []Node,
 };
 
 pub fn main() !void {
@@ -86,6 +85,20 @@ pub fn main() !void {
     };
     const snapshots = try std.json.parse([]Snapshot, &std.json.TokenStream.init(contents), opts);
     defer std.json.parseFree([]Snapshot, snapshots, opts);
+
+    for (snapshots) |snapshot| {
+        for (snapshot.sections) |section| {
+            std.debug.warn("{s}\n", .{section.name});
+            std.debug.warn("---------------  {x}\n", .{section.address});
+
+            for (section.nodes) |node| {
+                std.debug.print("...............  {x}\n", .{node.address});
+                std.debug.print("...............  {x}\n", .{node.address + node.size});
+            }
+
+            std.debug.warn("---------------  {x}\n\n", .{section.address + section.size});
+        }
+    }
 }
 
 fn usageAndExit(arg0: []const u8) noreturn {

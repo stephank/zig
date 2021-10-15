@@ -888,7 +888,10 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
         }
 
         try self.flushModule(comp);
-        try self.snapshotState();
+
+        if (build_options.enable_snapshots) {
+            try self.snapshotState();
+        }
     }
 
     cache: {
@@ -5197,6 +5200,18 @@ fn snapshotState(self: *MachO) !void {
             name: []const u8,
             address: u64,
             size: u64,
+            nodes: []Node,
+        };
+
+        const Node = struct {
+            const Link = struct {
+                source_address: u64,
+                target_address: u64,
+            };
+
+            address: u64,
+            size: u64,
+            links: []Link,
         };
 
         const Symtab = struct {
@@ -5230,24 +5245,11 @@ fn snapshotState(self: *MachO) !void {
             file: i32,
         };
 
-        const Node = struct {
-            const Link = struct {
-                source_address: u64,
-                target_address: u64,
-            };
-
-            address: u64,
-            size: u64,
-            section: u8,
-            links: []Link,
-        };
-
         timestamp: i128,
         objects: [][]const u8,
         sections: []Section,
         symtab: Symtab,
         resolver: []ResolverEntry,
-        nodes: []Node,
     };
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -5278,7 +5280,6 @@ fn snapshotState(self: *MachO) !void {
             .undefs = undefined,
         },
         .resolver = undefined,
-        .nodes = undefined,
     };
 
     // Snapshot state of objects table
@@ -5288,26 +5289,6 @@ fn snapshotState(self: *MachO) !void {
         objects.appendAssumeCapacity(object.name);
     }
     snapshot.objects = objects.toOwnedSlice();
-
-    // Snapshot state of the sections
-    var sections = std.ArrayList(Snapshot.Section).init(arena);
-    for (self.load_commands.items) |lc| {
-        if (lc != .Segment) break;
-        const seg = lc.Segment;
-        try sections.ensureUnusedCapacity(seg.sections.items.len);
-
-        for (seg.sections.items) |sect| {
-            sections.appendAssumeCapacity(.{
-                .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
-                    commands.segmentName(sect),
-                    commands.sectionName(sect),
-                }),
-                .address = sect.addr,
-                .size = sect.size,
-            });
-        }
-    }
-    snapshot.sections = sections.toOwnedSlice();
 
     // Snapshot state of the symbol table
     var locals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
@@ -5367,16 +5348,34 @@ fn snapshotState(self: *MachO) !void {
     }
     snapshot.resolver = resolver.toOwnedSlice();
 
-    // Snapshot nodes and links between them
-    var nodes = std.ArrayList(Snapshot.Node).init(arena);
+    // Snapshot sections, nodes and links between them
+    var sections = std.ArrayList(Snapshot.Section).init(arena);
+    try sections.ensureTotalCapacity(self.atoms.count());
     {
         var it = self.atoms.iterator();
         while (it.next()) |entry| {
-            const section = @intCast(u8, self.section_ordinals.getIndex(entry.key_ptr.*).?);
+            var section = blk: {
+                const match = entry.key_ptr.*;
+                const seg = self.load_commands.items[match.seg].Segment;
+                const sect = seg.sections.items[match.sect];
+                break :blk Snapshot.Section{
+                    .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
+                        commands.segmentName(sect),
+                        commands.sectionName(sect),
+                    }),
+                    .address = sect.addr,
+                    .size = sect.size,
+                    .nodes = undefined,
+                };
+            };
+
+            var nodes = std.ArrayList(Snapshot.Node).init(arena);
             var atom: *Atom = entry.value_ptr.*;
+
             while (true) {
                 var links = std.ArrayList(Snapshot.Node.Link).init(arena);
                 try links.ensureTotalCapacity(atom.relocs.items.len);
+
                 for (atom.relocs.items) |rel| {
                     const arch = self.base.options.target.cpu.arch;
                     const source_addr = blk: {
@@ -5440,24 +5439,29 @@ fn snapshotState(self: *MachO) !void {
                             },
                         }
                     };
+
                     links.appendAssumeCapacity(.{
                         .source_address = source_addr,
                         .target_address = target_addr,
                     });
                 }
+
                 try nodes.append(.{
                     .address = self.locals.items[atom.local_sym_index].n_value,
                     .size = atom.size,
-                    .section = section,
                     .links = links.toOwnedSlice(),
                 });
+
                 if (atom.prev) |prev| {
                     atom = prev;
                 } else break;
             }
+
+            section.nodes = nodes.toOwnedSlice();
+            sections.appendAssumeCapacity(section);
         }
     }
-    snapshot.nodes = nodes.toOwnedSlice();
+    snapshot.sections = sections.toOwnedSlice();
 
     try std.json.stringify(snapshot, .{}, writer);
     try writer.writeByte(']');
