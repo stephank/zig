@@ -5236,7 +5236,8 @@ fn snapshotState(self: *MachO) !void {
                 target_address: u64,
             };
 
-            base_address: u64,
+            address: u64,
+            size: u64,
             section: u8,
             links: []Link,
         };
@@ -5445,7 +5446,8 @@ fn snapshotState(self: *MachO) !void {
                     });
                 }
                 try nodes.append(.{
-                    .base_address = self.locals.items[atom.local_sym_index].n_value,
+                    .address = self.locals.items[atom.local_sym_index].n_value,
+                    .size = atom.size,
                     .section = section,
                     .links = links.toOwnedSlice(),
                 });
