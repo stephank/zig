@@ -5253,30 +5253,22 @@ fn snapshotState(self: *MachO) !void {
     defer arena_allocator.deinit();
     const arena = &arena_allocator.allocator;
 
-    var out_dir = blk: while (true) {
-        var out_dir = emit.directory.handle.openDir("snapshots", .{
-            .access_sub_paths = true,
-        }) catch |err| switch (err) {
-            error.FileNotFound => {
-                try emit.directory.handle.makeDir("snapshots");
-                continue :blk;
-            },
-            else => |e| return e,
-        };
-        break :blk out_dir;
-    } else unreachable;
-    defer out_dir.close();
-
-    const timestamp = std.time.nanoTimestamp();
-    const sub_path = try std.fmt.allocPrint(arena, "snapshot_{d}.json", .{timestamp});
-    const out_file = try out_dir.createFile(sub_path, .{
-        .truncate = true,
+    const out_file = try emit.directory.handle.createFile("snapshots.json", .{
+        .truncate = self.cold_start,
         .read = true,
     });
     defer out_file.close();
 
+    if (out_file.seekFromEnd(-1)) {
+        try out_file.writer().writeByte(',');
+    } else |err| switch (err) {
+        error.Unseekable => try out_file.writer().writeByte('['),
+        else => |e| return e,
+    }
+    var writer = out_file.writer();
+
     var snapshot = Snapshot{
-        .timestamp = timestamp,
+        .timestamp = std.time.nanoTimestamp(),
         .objects = undefined,
         .sections = undefined,
         .symtab = .{
@@ -5465,5 +5457,6 @@ fn snapshotState(self: *MachO) !void {
     }
     snapshot.nodes = nodes.toOwnedSlice();
 
-    try std.json.stringify(snapshot, .{}, out_file.writer());
+    try std.json.stringify(snapshot, .{}, writer);
+    try writer.writeByte(']');
 }
