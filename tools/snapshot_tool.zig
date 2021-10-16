@@ -87,40 +87,67 @@ pub fn main() !void {
     defer std.json.parseFree([]Snapshot, snapshots, opts);
 
     for (snapshots) |snapshot| {
-        std.debug.warn("Snapshot {d}\n", .{snapshot.timestamp});
+        std.debug.warn("Snapshot {d}\n\n", .{snapshot.timestamp});
+
+        var symtab = std.AutoHashMap(u64, std.ArrayList(Snapshot.Symtab.Symbol)).init(arena);
+
+        for (snapshot.symtab.globals) |sym| {
+            const res = try symtab.getOrPut(sym.address);
+            if (!res.found_existing) {
+                res.value_ptr.* = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
+            }
+            try res.value_ptr.append(sym);
+        }
+        for (snapshot.symtab.locals) |sym| {
+            const res = try symtab.getOrPut(sym.address);
+            if (!res.found_existing) {
+                res.value_ptr.* = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
+            }
+            try res.value_ptr.append(sym);
+        }
 
         for (snapshot.sections) |section| {
-            std.debug.warn("{s}\n", .{section.name});
-            std.debug.warn("---------------  {x}\n", .{section.address});
+            std.debug.warn("{s:-<25}  {x}\n", .{ section.name, section.address });
 
-            for (section.nodes) |node| {
+            for (section.nodes) |node, node_id| {
+                if (node_id > 0) {
+                    std.debug.print("\n", .{});
+                }
+                if (symtab.get(node.address)) |syms| {
+                    std.debug.print("   / {s:.<20}  {x}\n", .{ syms.items[0].name, node.address });
+                } else {
+                    std.debug.print("   / {s:.<20}  {x}\n", .{ "unnamed", node.address });
+                }
+
                 var symbols = std.AutoHashMap(u64, Snapshot.Symtab.Symbol).init(arena);
 
                 for (snapshot.symtab.globals) |sym| {
+                    if (sym.address == node.address) continue;
                     if (node.address <= sym.address and sym.address < node.address + node.size) {
                         if (symbols.contains(sym.address)) continue;
                         try symbols.putNoClobber(sym.address, sym);
                     }
                 }
-
                 for (snapshot.symtab.locals) |sym| {
+                    if (sym.address == node.address) continue;
                     if (node.address <= sym.address and sym.address < node.address + node.size) {
                         if (symbols.contains(sym.address)) continue;
                         try symbols.putNoClobber(sym.address, sym);
                     }
                 }
-
-                std.debug.print("  .............  {x}\n", .{node.address});
 
                 var it = symbols.valueIterator();
                 while (it.next()) |sym| {
-                    std.debug.print("    {s}  {x}\n", .{ sym.name, sym.address });
+                    std.debug.print("  | {s: <21}\n", .{""});
+                    std.debug.print("  | {s: <21}  {x}\n", .{ sym.name, sym.address });
                 }
 
-                std.debug.print("  .............  {x}\n", .{node.address + node.size});
+                std.debug.print("  | {s: <21}\n", .{""});
+
+                std.debug.print("   \\ {s:.<20}  {x}\n", .{ "", node.address + node.size });
             }
 
-            std.debug.warn("---------------  {x}\n\n", .{section.address + section.size});
+            std.debug.warn("{s:-<25}  {x}\n\n", .{ "", section.address + section.size });
         }
 
         std.debug.warn("\n", .{});
