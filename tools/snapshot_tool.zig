@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.snapshot);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -102,8 +103,6 @@ pub fn main() !void {
 
     for (snapshots) |snapshot| {
         try writer.writeAll("<svg width=\"100%\" height=\"100%\">\n");
-        std.debug.warn("Snapshot {d}\n\n", .{snapshot.timestamp});
-
         var symtab = std.AutoHashMap(u64, std.ArrayList(Snapshot.Symtab.Symbol)).init(arena);
 
         for (snapshot.symtab.globals) |sym| {
@@ -123,17 +122,17 @@ pub fn main() !void {
 
         var snapshot_rect = Rect{
             .width = 300,
-            .height = 1000,
+            .height = 0,
             .x = 0,
             .y = 0,
             .address = 0,
-            .size = 0x100000000,
+            .size = 0,
         };
 
         for (snapshot.sections) |section| {
             const prev_rect = snapshot_rect.lastChild();
             const sect_rect = try snapshot_rect.addChild(arena);
-            sect_rect.y = if (prev_rect) |pr| pr.y + 50 else 25;
+            sect_rect.y = if (prev_rect) |pr| pr.y + pr.height else 0;
             sect_rect.width = snapshot_rect.width;
             sect_rect.height = 50;
             sect_rect.address = section.address;
@@ -141,17 +140,15 @@ pub fn main() !void {
             sect_rect.name = section.name;
             snapshot_rect.size += section.size;
 
-            std.debug.warn("{s:-<25}  {x}\n", .{ section.name, section.address });
-
-            for (section.nodes) |node, node_id| {
-                if (node_id > 0) {
-                    std.debug.print("\n", .{});
-                }
-                if (symtab.get(node.address)) |syms| {
-                    std.debug.print("   / {s:.<20}  {x}\n", .{ syms.items[0].name, node.address });
-                } else {
-                    std.debug.print("   / {s:.<20}  {x}\n", .{ "unnamed", node.address });
-                }
+            for (section.nodes) |node| {
+                const prev_node_rect = sect_rect.lastChild();
+                const node_rect = try sect_rect.addChild(arena);
+                node_rect.x = sect_rect.x + 10;
+                node_rect.y = if (prev_node_rect) |pr| pr.y + 20 else sect_rect.y + 30;
+                node_rect.width = sect_rect.width - 20;
+                node_rect.height = 20;
+                node_rect.address = node.address;
+                node_rect.size = node.size;
 
                 var symbols = std.AutoHashMap(u64, Snapshot.Symtab.Symbol).init(arena);
 
@@ -172,21 +169,17 @@ pub fn main() !void {
 
                 var it = symbols.valueIterator();
                 while (it.next()) |sym| {
-                    std.debug.print("  | {s: <21}\n", .{""});
-                    std.debug.print("  | {s: <21}  {x}\n", .{ sym.name, sym.address });
+                    _ = sym;
                 }
 
-                std.debug.print("  | {s: <21}\n", .{""});
-
-                std.debug.print("   \\ {s:.<20}  {x}\n", .{ "", node.address + node.size });
+                sect_rect.height += node_rect.height;
             }
 
-            std.debug.warn("{s:-<25}  {x}\n\n", .{ "", section.address + section.size });
+            snapshot_rect.height += sect_rect.height;
         }
 
         try snapshot_rect.toHtml(writer);
         try writer.writeAll("</svg>\n");
-        std.debug.warn("\n", .{});
     }
 
     try writer.writeAll("</body>\n");
@@ -246,6 +239,7 @@ const Rect = struct {
         if (rect.name) |name| {
             try writer.print("<text x='{d}' y='{d}'>{s}</text>", .{ rect.x + 10, rect.y + 20, name });
         }
+        try writer.print("<text x='{d}' y='{d}'>{x}</text>", .{ 305, rect.y + 12, rect.address });
         for (rect.children.items) |child| {
             try child.toHtml(writer);
         }
