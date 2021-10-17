@@ -1,6 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
 
+const Allocator = mem.Allocator;
+
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa = &general_purpose_allocator.allocator;
 
@@ -86,7 +88,20 @@ pub fn main() !void {
     const snapshots = try std.json.parse([]Snapshot, &std.json.TokenStream.init(contents), opts);
     defer std.json.parseFree([]Snapshot, snapshots, opts);
 
+    const out_file = try std.fs.cwd().createFile("snapshots.html", .{
+        .truncate = true,
+        .read = true,
+    });
+    defer out_file.close();
+
+    const writer = out_file.writer();
+
+    try writer.writeAll("<html>\n");
+    try writer.writeAll("<head></head>\n");
+    try writer.writeAll("<body>\n");
+
     for (snapshots) |snapshot| {
+        try writer.writeAll("<svg width=\"100%\" height=\"100%\">\n");
         std.debug.warn("Snapshot {d}\n\n", .{snapshot.timestamp});
 
         var symtab = std.AutoHashMap(u64, std.ArrayList(Snapshot.Symtab.Symbol)).init(arena);
@@ -106,7 +121,26 @@ pub fn main() !void {
             try res.value_ptr.append(sym);
         }
 
+        var snapshot_rect = Rect{
+            .width = 300,
+            .height = 1000,
+            .x = 0,
+            .y = 0,
+            .address = 0,
+            .size = 0x100000000,
+        };
+
         for (snapshot.sections) |section| {
+            const prev_rect = snapshot_rect.lastChild();
+            const sect_rect = try snapshot_rect.addChild(arena);
+            sect_rect.y = if (prev_rect) |pr| pr.y + 50 else 25;
+            sect_rect.width = snapshot_rect.width;
+            sect_rect.height = 50;
+            sect_rect.address = section.address;
+            sect_rect.size = section.size;
+            sect_rect.name = section.name;
+            snapshot_rect.size += section.size;
+
             std.debug.warn("{s:-<25}  {x}\n", .{ section.name, section.address });
 
             for (section.nodes) |node, node_id| {
@@ -150,11 +184,70 @@ pub fn main() !void {
             std.debug.warn("{s:-<25}  {x}\n\n", .{ "", section.address + section.size });
         }
 
+        try snapshot_rect.toHtml(writer);
+        try writer.writeAll("</svg>\n");
         std.debug.warn("\n", .{});
     }
+
+    try writer.writeAll("</body>\n");
+    try writer.writeAll("</html>\n");
 }
 
 fn usageAndExit(arg0: []const u8) noreturn {
     std.debug.warn("Usage: {s} <input_json_file>\n", .{arg0});
     std.process.exit(1);
 }
+
+const Rect = struct {
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    address: u64,
+    size: u64,
+    name: ?[]const u8 = null,
+    children: std.ArrayListUnmanaged(*Rect) = .{},
+
+    fn deinit(rect: *Rect, allocator: *Allocator) void {
+        for (rect.children.items) |child| {
+            child.deinit(allocator);
+            allocator.destroy(child);
+        }
+        rect.children.deinit(allocator);
+    }
+
+    fn addChild(rect: *Rect, allocator: *Allocator) !*Rect {
+        const child = try allocator.create(Rect);
+        errdefer allocator.destroy(child);
+        child.* = .{
+            .width = 0,
+            .height = 0,
+            .x = 0,
+            .y = 0,
+            .address = 0,
+            .size = 0,
+        };
+        try rect.children.append(allocator, child);
+        return child;
+    }
+
+    fn lastChild(rect: Rect) ?*Rect {
+        if (rect.children.items.len == 0) return null;
+        return rect.children.items[rect.children.items.len - 1];
+    }
+
+    fn toHtml(rect: Rect, writer: anytype) @TypeOf(writer).Error!void {
+        try writer.print("<rect width='{d}' height='{d}' x='{d}' y='{d}' fill='none' stroke='black' />\n", .{
+            rect.width,
+            rect.height,
+            rect.x,
+            rect.y,
+        });
+        if (rect.name) |name| {
+            try writer.print("<text x='{d}' y='{d}'>{s}</text>", .{ rect.x + 10, rect.y + 20, name });
+        }
+        for (rect.children.items) |child| {
+            try child.toHtml(writer);
+        }
+    }
+};
