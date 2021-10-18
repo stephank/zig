@@ -536,24 +536,6 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
             try fs.cwd().copyFile(the_object_path, fs.cwd(), full_out_path, .{});
         }
     } else {
-        if (use_stage1) {
-            const sub_path = self.base.options.emit.?.sub_path;
-            self.base.file = try directory.handle.createFile(sub_path, .{
-                .truncate = true,
-                .read = true,
-                .mode = link.determineMode(self.base.options),
-            });
-            try self.populateMissingMetadata();
-            try self.locals.append(self.base.allocator, .{
-                .n_strx = 0,
-                .n_type = macho.N_UNDF,
-                .n_sect = 0,
-                .n_desc = 0,
-                .n_value = 0,
-            });
-            try self.strtab.append(self.base.allocator, 0);
-        }
-
         if (needs_full_relink) {
             for (self.objects.items) |*object| {
                 object.free(self.base.allocator, self);
