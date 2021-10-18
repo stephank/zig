@@ -82,10 +82,10 @@ test "cmpxchg with ignored result" {
     try expect(5678 == x);
 }
 
-test "128-bit cmpxchg" {
-    try test_u128_cmpxchg();
-    comptime try test_u128_cmpxchg();
-}
+// test "128-bit cmpxchg" {
+//     try test_u128_cmpxchg();
+//     comptime try test_u128_cmpxchg();
+// }
 
 fn test_u128_cmpxchg() !void {
     if (builtin.zig_is_stage2) {

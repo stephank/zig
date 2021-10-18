@@ -275,18 +275,14 @@ pub const SrcFn = struct {
     };
 };
 
-pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Options) !*MachO {
+pub fn openPath(allocator: *Allocator, options: link.Options) !*MachO {
     assert(options.object_format == .macho);
 
-    if (build_options.have_llvm and options.use_llvm) {
-        const self = try createEmpty(allocator, options);
-        errdefer self.base.destroy();
+    const emit = options.emit orelse {
+        return try createEmpty(allocator, options);
+    };
 
-        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
-        return self;
-    }
-
-    const file = try options.emit.?.directory.handle.createFile(sub_path, .{
+    const file = try emit.directory.handle.createFile(emit.sub_path, .{
         .truncate = false,
         .read = true,
         .mode = link.determineMode(options),
@@ -301,7 +297,20 @@ pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Optio
 
     self.base.file = file;
 
-    if (options.output_mode == .Lib and options.link_mode == .Static) {
+    if (build_options.have_llvm and options.use_llvm and options.module != null) {
+        // TODO this intermediary_basename isn't enough; in the case of `zig build-exe`,
+        // we also want to put the intermediary object file in the cache while the
+        // main emit directory is the cwd.
+        const sub_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{
+            emit.sub_path, options.object_format.fileExt(options.target.cpu.arch),
+        });
+        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
+        self.base.intermediary_basename = sub_path;
+    }
+
+    if (options.output_mode == .Lib and
+        options.link_mode == .Static and self.base.intermediary_basename != null)
+    {
         return self;
     }
 
@@ -834,6 +843,26 @@ pub fn flush(self: *MachO, comp: *Compilation) !void {
         try self.createDsoHandleAtom();
         try self.addCodeSignatureLC();
 
+        log.debug("locals:", .{});
+        for (self.locals.items) |sym, id| {
+            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        }
+        log.debug("globals:", .{});
+        for (self.globals.items) |sym, id| {
+            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        }
+        log.debug("undefs:", .{});
+        for (self.undefs.items) |sym, id| {
+            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+        }
+        {
+            log.debug("resolver:", .{});
+            var it = self.symbol_resolver.iterator();
+            while (it.next()) |entry| {
+                log.debug("  {s} => {}", .{ self.getString(entry.key_ptr.*), entry.value_ptr.* });
+            }
+        }
+
         for (self.unresolved.keys()) |index| {
             const sym = self.undefs.items[index];
             const sym_name = self.getString(sym.n_strx);
@@ -914,6 +943,12 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
     const tracy = trace(@src());
     defer tracy.end();
+
+    if (build_options.have_llvm)
+        if (self.llvm_object) |llvm_object| try llvm_object.flushModule(comp);
+
+    if (self.base.options.output_mode == .Lib and self.base.options.link_mode == .Static)
+        return;
 
     try self.setEntryPoint();
     try self.updateSectionOrdinals();
@@ -3035,6 +3070,7 @@ fn growAtom(self: *MachO, atom: *Atom, new_atom_size: u64, alignment: u64, match
 }
 
 pub fn allocateDeclIndexes(self: *MachO, decl: *Module.Decl) !void {
+    if (self.llvm_object) |_| return;
     if (decl.link.macho.local_sym_index != 0) return;
 
     try self.locals.ensureUnusedCapacity(self.base.allocator, 1);
@@ -3458,6 +3494,7 @@ pub fn updateDeclExports(
 }
 
 pub fn deleteExport(self: *MachO, exp: Export) void {
+    if (self.llvm_object) |_| return;
     const sym_index = exp.sym_index orelse return;
     self.globals_free_list.append(self.base.allocator, sym_index) catch {};
     const global = &self.globals.items[sym_index];
