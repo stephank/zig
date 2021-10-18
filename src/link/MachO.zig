@@ -5197,42 +5197,37 @@ fn snapshotState(self: *MachO) !void {
 
     const Snapshot = struct {
         const Node = struct {
-            const Metadata = union(enum) {
-                section_start: []const u8,
+            const Tag = enum {
+                section_start,
                 section_end,
-                atom_start: Node.Atom,
+                atom_start,
                 atom_end,
-                relocation: u64,
+                relocation,
 
-                pub fn jsonStringify(value: Metadata, options: std.json.StringifyOptions, out_stream: anytype) !void {
-                    switch (value) {
-                        .section_start => |x| {
-                            try out_stream.writeAll("{\"section_start\":");
-                            try std.json.stringify(x, options, out_stream);
-                            try out_stream.writeAll("}");
-                        },
+                pub fn jsonStringify(
+                    tag: Tag,
+                    options: std.json.StringifyOptions,
+                    out_stream: anytype,
+                ) !void {
+                    _ = options;
+                    switch (tag) {
+                        .section_start => try out_stream.writeAll("\"section_start\""),
                         .section_end => try out_stream.writeAll("\"section_end\""),
-                        .atom_start => |x| {
-                            try out_stream.writeAll("{\"atom_start\":");
-                            try std.json.stringify(x, options, out_stream);
-                            try out_stream.writeAll("}");
-                        },
+                        .atom_start => try out_stream.writeAll("\"atom_start\""),
                         .atom_end => try out_stream.writeAll("\"atom_end\""),
-                        .relocation => |x| {
-                            try out_stream.writeAll("{\"relocation\":");
-                            try std.json.stringify(x, options, out_stream);
-                            try out_stream.writeAll("}");
-                        },
+                        .relocation => try out_stream.writeAll("\"relocation\""),
                     }
                 }
             };
-            const Atom = struct {
-                name: ?[]const u8,
-                aliases: [][]const u8,
-                is_global: bool,
+            const Payload = struct {
+                name: []const u8 = "",
+                aliases: [][]const u8 = &[0][]const u8{},
+                is_global: bool = false,
+                target: u64 = 0,
             };
             address: u64,
-            metadata: Metadata,
+            tag: Tag,
+            payload: Payload,
         };
         timestamp: i128,
         nodes: []Node,
@@ -5271,13 +5266,15 @@ fn snapshotState(self: *MachO) !void {
         });
         try nodes.append(.{
             .address = sect.addr,
-            .metadata = .{ .section_start = sect_name },
+            .tag = .section_start,
+            .payload = .{ .name = sect_name },
         });
 
         var atom: *Atom = self.atoms.get(key) orelse {
             try nodes.append(.{
                 .address = sect.addr + sect.size,
-                .metadata = .section_end,
+                .tag = .section_end,
+                .payload = .{},
             });
             continue;
         };
@@ -5290,12 +5287,10 @@ fn snapshotState(self: *MachO) !void {
             const atom_sym = self.locals.items[atom.local_sym_index];
             var node = Snapshot.Node{
                 .address = atom_sym.n_value,
-                .metadata = .{
-                    .atom_start = .{
-                        .name = self.getString(atom_sym.n_strx),
-                        .aliases = undefined,
-                        .is_global = self.symbol_resolver.contains(atom_sym.n_strx),
-                    },
+                .tag = .atom_start,
+                .payload = .{
+                    .name = self.getString(atom_sym.n_strx),
+                    .is_global = self.symbol_resolver.contains(atom_sym.n_strx),
                 },
             };
 
@@ -5303,7 +5298,7 @@ fn snapshotState(self: *MachO) !void {
             for (atom.aliases.items) |loc| {
                 try aliases.append(self.getString(self.locals.items[loc].n_strx));
             }
-            node.metadata.atom_start.aliases = aliases.toOwnedSlice();
+            node.payload.aliases = aliases.toOwnedSlice();
             try nodes.append(node);
 
             var relocs = std.ArrayList(Snapshot.Node).init(arena);
@@ -5374,9 +5369,8 @@ fn snapshotState(self: *MachO) !void {
 
                 relocs.appendAssumeCapacity(.{
                     .address = source_addr,
-                    .metadata = .{
-                        .relocation = target_addr,
-                    },
+                    .tag = .relocation,
+                    .payload = .{ .target = target_addr },
                 });
             }
 
@@ -5396,12 +5390,10 @@ fn snapshotState(self: *MachO) !void {
                     const cont_sym_name = self.getString(cont_sym.n_strx);
                     var contained_node = Snapshot.Node{
                         .address = cont_sym.n_value,
-                        .metadata = .{
-                            .atom_start = .{
-                                .name = cont_sym_name,
-                                .aliases = undefined,
-                                .is_global = self.symbol_resolver.contains(cont_sym.n_strx),
-                            },
+                        .tag = .atom_start,
+                        .payload = .{
+                            .name = cont_sym_name,
+                            .is_global = self.symbol_resolver.contains(cont_sym.n_strx),
                         },
                     };
 
@@ -5413,9 +5405,9 @@ fn snapshotState(self: *MachO) !void {
                         if (next_sym.n_value != cont_sym.n_value) break;
                         const next_sym_name = self.getString(next_sym.n_strx);
                         if (self.symbol_resolver.contains(next_sym.n_strx)) {
-                            try inner_aliases.append(contained_node.metadata.atom_start.name.?);
-                            contained_node.metadata.atom_start.name = next_sym_name;
-                            contained_node.metadata.atom_start.is_global = true;
+                            try inner_aliases.append(contained_node.payload.name);
+                            contained_node.payload.name = next_sym_name;
+                            contained_node.payload.is_global = true;
                         } else try inner_aliases.append(next_sym_name);
                         next_i += 1;
                     }
@@ -5425,7 +5417,7 @@ fn snapshotState(self: *MachO) !void {
                     else
                         atom_sym.n_value + atom.size - cont_sym.n_value;
 
-                    contained_node.metadata.atom_start.aliases = inner_aliases.toOwnedSlice();
+                    contained_node.payload.aliases = inner_aliases.toOwnedSlice();
                     try nodes.append(contained_node);
 
                     for (relocs.items[last_rel..]) |rel, rel_i| {
@@ -5438,14 +5430,16 @@ fn snapshotState(self: *MachO) !void {
 
                     try nodes.append(.{
                         .address = cont_sym.n_value + cont_size,
-                        .metadata = .atom_end,
+                        .tag = .atom_end,
+                        .payload = .{},
                     });
                 }
             }
 
             try nodes.append(.{
                 .address = atom_sym.n_value + atom.size,
-                .metadata = .atom_end,
+                .tag = .atom_end,
+                .payload = .{},
             });
 
             if (atom.next) |next| {
@@ -5455,7 +5449,8 @@ fn snapshotState(self: *MachO) !void {
 
         try nodes.append(.{
             .address = sect.addr + sect.size,
-            .metadata = .section_end,
+            .tag = .section_end,
+            .payload = .{},
         });
     }
 
