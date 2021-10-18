@@ -5196,60 +5196,46 @@ fn snapshotState(self: *MachO) !void {
     };
 
     const Snapshot = struct {
-        const Section = struct {
-            name: []const u8,
-            address: u64,
-            size: u64,
-            nodes: []Node,
-        };
-
         const Node = struct {
-            const Link = struct {
-                source_address: u64,
-                target_address: u64,
-            };
+            const Metadata = union(enum) {
+                section_start: []const u8,
+                section_end,
+                atom_start: Node.Atom,
+                atom_end,
+                relocation: u64,
 
-            address: u64,
-            size: u64,
-            links: []Link,
-        };
-
-        const Symtab = struct {
-            const Symbol = struct {
-                name: []const u8,
-                address: u64,
-                section: u8,
-            };
-
-            locals: []Symbol,
-            globals: []Symbol,
-            undefs: []Symbol,
-        };
-
-        const ResolverEntry = struct {
-            name: []const u8,
-            where: enum {
-                global,
-                undef,
-
-                pub fn jsonStringify(value: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
-                    _ = options;
+                pub fn jsonStringify(value: Metadata, options: std.json.StringifyOptions, out_stream: anytype) !void {
                     switch (value) {
-                        .global => try out_stream.writeAll("\"global\""),
-                        .undef => try out_stream.writeAll("\"undef\""),
+                        .section_start => |x| {
+                            try out_stream.writeAll("{\"section_start\":");
+                            try std.json.stringify(x, options, out_stream);
+                            try out_stream.writeAll("}");
+                        },
+                        .section_end => try out_stream.writeAll("\"section_end\""),
+                        .atom_start => |x| {
+                            try out_stream.writeAll("{\"atom_start\":");
+                            try std.json.stringify(x, options, out_stream);
+                            try out_stream.writeAll("}");
+                        },
+                        .atom_end => try out_stream.writeAll("\"atom_end\""),
+                        .relocation => |x| {
+                            try out_stream.writeAll("{\"relocation\":");
+                            try std.json.stringify(x, options, out_stream);
+                            try out_stream.writeAll("}");
+                        },
                     }
                 }
-            },
-            where_index: u32,
-            local_sym_index: u32,
-            file: i32,
+            };
+            const Atom = struct {
+                name: ?[]const u8,
+                aliases: [][]const u8,
+                is_global: bool,
+            };
+            address: u64,
+            metadata: Metadata,
         };
-
         timestamp: i128,
-        objects: [][]const u8,
-        sections: []Section,
-        symtab: Symtab,
-        resolver: []ResolverEntry,
+        nodes: []Node,
     };
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -5272,105 +5258,27 @@ fn snapshotState(self: *MachO) !void {
 
     var snapshot = Snapshot{
         .timestamp = std.time.nanoTimestamp(),
-        .objects = undefined,
-        .sections = undefined,
-        .symtab = .{
-            .locals = undefined,
-            .globals = undefined,
-            .undefs = undefined,
-        },
-        .resolver = undefined,
+        .nodes = undefined,
     };
-
-    // Snapshot state of objects table
-    var objects = std.ArrayList([]const u8).init(arena);
-    try objects.ensureTotalCapacity(self.objects.items.len);
-    for (self.objects.items) |object| {
-        objects.appendAssumeCapacity(object.name);
-    }
-    snapshot.objects = objects.toOwnedSlice();
-
-    // Snapshot state of the symbol table
-    var locals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
-    var globals = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
-    var undefs = std.ArrayList(Snapshot.Symtab.Symbol).init(arena);
-
-    try locals.ensureTotalCapacity(self.locals.items.len);
-    for (self.locals.items) |sym| {
-        if (sym.n_strx == 0) continue;
-        locals.appendAssumeCapacity(.{
-            .name = self.getString(sym.n_strx),
-            .address = sym.n_value,
-            .section = if (sym.n_sect > 0) sym.n_sect - 1 else 0,
-        });
-    }
-    snapshot.symtab.locals = locals.toOwnedSlice();
-
-    try globals.ensureTotalCapacity(self.globals.items.len);
-    for (self.globals.items) |sym| {
-        globals.appendAssumeCapacity(.{
-            .name = self.getString(sym.n_strx),
-            .address = sym.n_value,
-            .section = sym.n_sect - 1,
-        });
-    }
-    snapshot.symtab.globals = globals.toOwnedSlice();
-
-    try undefs.ensureTotalCapacity(self.undefs.items.len);
-    for (self.undefs.items) |sym| {
-        if (sym.n_strx == 0) continue;
-        undefs.appendAssumeCapacity(.{
-            .name = self.getString(sym.n_strx),
-            .address = sym.n_value,
-            .section = 0,
-        });
-    }
-    snapshot.symtab.undefs = undefs.toOwnedSlice();
-
-    // Snapshot state of the symbol resolver
-    var resolver = std.ArrayList(Snapshot.ResolverEntry).init(arena);
-    try resolver.ensureTotalCapacity(self.symbol_resolver.count());
-    {
-        var it = self.symbol_resolver.iterator();
-        while (it.next()) |entry| {
-            const value = entry.value_ptr.*;
-            resolver.appendAssumeCapacity(.{
-                .name = self.getString(entry.key_ptr.*),
-                .where = switch (value.where) {
-                    .global => .global,
-                    .undef => .undef,
-                },
-                .where_index = value.where_index,
-                .local_sym_index = value.local_sym_index,
-                .file = value.file orelse -1,
-            });
-        }
-    }
-    snapshot.resolver = resolver.toOwnedSlice();
-
-    // Snapshot sections, nodes and links between them
-    var sections = std.ArrayList(Snapshot.Section).init(arena);
-    try sections.ensureTotalCapacity(self.section_ordinals.count());
+    var nodes = std.ArrayList(Snapshot.Node).init(arena);
 
     for (self.section_ordinals.keys()) |key| {
-        var section = blk: {
-            const seg = self.load_commands.items[key.seg].Segment;
-            const sect = seg.sections.items[key.sect];
-            break :blk Snapshot.Section{
-                .name = try std.fmt.allocPrint(arena, "{s},{s}", .{
-                    commands.segmentName(sect),
-                    commands.sectionName(sect),
-                }),
-                .address = sect.addr,
-                .size = sect.size,
-                .nodes = undefined,
-            };
-        };
+        const seg = self.load_commands.items[key.seg].Segment;
+        const sect = seg.sections.items[key.sect];
+        const sect_name = try std.fmt.allocPrint(arena, "{s},{s}", .{
+            commands.segmentName(sect),
+            commands.sectionName(sect),
+        });
+        try nodes.append(.{
+            .address = sect.addr,
+            .metadata = .{ .section_start = sect_name },
+        });
 
-        var nodes = std.ArrayList(Snapshot.Node).init(arena);
         var atom: *Atom = self.atoms.get(key) orelse {
-            section.nodes = &[0]Snapshot.Node{};
-            sections.appendAssumeCapacity(section);
+            try nodes.append(.{
+                .address = sect.addr + sect.size,
+                .metadata = .section_end,
+            });
             continue;
         };
 
@@ -5379,9 +5287,27 @@ fn snapshotState(self: *MachO) !void {
         }
 
         while (true) {
-            var links = std.ArrayList(Snapshot.Node.Link).init(arena);
-            try links.ensureTotalCapacity(atom.relocs.items.len);
+            const atom_sym = self.locals.items[atom.local_sym_index];
+            var node = Snapshot.Node{
+                .address = atom_sym.n_value,
+                .metadata = .{
+                    .atom_start = .{
+                        .name = self.getString(atom_sym.n_strx),
+                        .aliases = undefined,
+                        .is_global = self.symbol_resolver.contains(atom_sym.n_strx),
+                    },
+                },
+            };
 
+            var aliases = std.ArrayList([]const u8).init(arena);
+            for (atom.aliases.items) |loc| {
+                try aliases.append(self.getString(self.locals.items[loc].n_strx));
+            }
+            node.metadata.atom_start.aliases = aliases.toOwnedSlice();
+            try nodes.append(node);
+
+            var relocs = std.ArrayList(Snapshot.Node).init(arena);
+            try relocs.ensureTotalCapacity(atom.relocs.items.len);
             for (atom.relocs.items) |rel| {
                 const arch = self.base.options.target.cpu.arch;
                 const source_addr = blk: {
@@ -5414,17 +5340,17 @@ fn snapshotState(self: *MachO) !void {
                             const is_tlv = is_tlv: {
                                 const source_sym = self.locals.items[atom.local_sym_index];
                                 const match = self.section_ordinals.keys()[source_sym.n_sect - 1];
-                                const seg = self.load_commands.items[match.seg].Segment;
-                                const sect = seg.sections.items[match.sect];
-                                break :is_tlv commands.sectionType(sect) == macho.S_THREAD_LOCAL_VARIABLES;
+                                const match_seg = self.load_commands.items[match.seg].Segment;
+                                const match_sect = match_seg.sections.items[match.sect];
+                                break :is_tlv commands.sectionType(match_sect) == macho.S_THREAD_LOCAL_VARIABLES;
                             };
                             if (is_tlv) {
-                                const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                const match_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                                 const base_address = inner: {
                                     if (self.tlv_data_section_index) |i| {
-                                        break :inner seg.sections.items[i].addr;
+                                        break :inner match_seg.sections.items[i].addr;
                                     } else if (self.tlv_bss_section_index) |i| {
-                                        break :inner seg.sections.items[i].addr;
+                                        break :inner match_seg.sections.items[i].addr;
                                     } else unreachable;
                                 };
                                 break :blk sym.n_value - base_address;
@@ -5446,16 +5372,80 @@ fn snapshotState(self: *MachO) !void {
                     }
                 };
 
-                links.appendAssumeCapacity(.{
-                    .source_address = source_addr,
-                    .target_address = target_addr,
+                relocs.appendAssumeCapacity(.{
+                    .address = source_addr,
+                    .metadata = .{
+                        .relocation = target_addr,
+                    },
                 });
             }
 
+            if (atom.contained.items.len == 0) {
+                try nodes.appendSlice(relocs.items);
+            } else {
+                // Need to reverse iteration order of relocs since by default for relocatable sources
+                // they come in reverse. For linking, this doesn't matter in any way, however, for
+                // arranging the memoryline for displaying it does.
+                std.mem.reverse(Snapshot.Node, relocs.items);
+
+                var next_i: usize = 0;
+                var last_rel: usize = 0;
+                while (next_i < atom.contained.items.len) : (next_i += 1) {
+                    const loc = atom.contained.items[next_i];
+                    const cont_sym = self.locals.items[loc.local_sym_index];
+                    const cont_sym_name = self.getString(cont_sym.n_strx);
+                    var contained_node = Snapshot.Node{
+                        .address = cont_sym.n_value,
+                        .metadata = .{
+                            .atom_start = .{
+                                .name = cont_sym_name,
+                                .aliases = undefined,
+                                .is_global = self.symbol_resolver.contains(cont_sym.n_strx),
+                            },
+                        },
+                    };
+
+                    // Accumulate aliases
+                    var inner_aliases = std.ArrayList([]const u8).init(arena);
+                    while (true) {
+                        if (next_i + 1 >= atom.contained.items.len) break;
+                        const next_sym = self.locals.items[atom.contained.items[next_i + 1].local_sym_index];
+                        if (next_sym.n_value != cont_sym.n_value) break;
+                        const next_sym_name = self.getString(next_sym.n_strx);
+                        if (self.symbol_resolver.contains(next_sym.n_strx)) {
+                            try inner_aliases.append(contained_node.metadata.atom_start.name.?);
+                            contained_node.metadata.atom_start.name = next_sym_name;
+                            contained_node.metadata.atom_start.is_global = true;
+                        } else try inner_aliases.append(next_sym_name);
+                        next_i += 1;
+                    }
+
+                    const cont_size = if (next_i + 1 < atom.contained.items.len)
+                        self.locals.items[atom.contained.items[next_i + 1].local_sym_index].n_value - cont_sym.n_value
+                    else
+                        atom_sym.n_value + atom.size - cont_sym.n_value;
+
+                    contained_node.metadata.atom_start.aliases = inner_aliases.toOwnedSlice();
+                    try nodes.append(contained_node);
+
+                    for (relocs.items[last_rel..]) |rel, rel_i| {
+                        if (rel.address >= cont_sym.n_value + cont_size) {
+                            last_rel = rel_i;
+                            break;
+                        }
+                        try nodes.append(rel);
+                    }
+
+                    try nodes.append(.{
+                        .address = cont_sym.n_value + cont_size,
+                        .metadata = .atom_end,
+                    });
+                }
+            }
+
             try nodes.append(.{
-                .address = self.locals.items[atom.local_sym_index].n_value,
-                .size = atom.size,
-                .links = links.toOwnedSlice(),
+                .address = atom_sym.n_value + atom.size,
+                .metadata = .atom_end,
             });
 
             if (atom.next) |next| {
@@ -5463,10 +5453,13 @@ fn snapshotState(self: *MachO) !void {
             } else break;
         }
 
-        section.nodes = nodes.toOwnedSlice();
-        sections.appendAssumeCapacity(section);
+        try nodes.append(.{
+            .address = sect.addr + sect.size,
+            .metadata = .section_end,
+        });
     }
-    snapshot.sections = sections.toOwnedSlice();
+
+    snapshot.nodes = nodes.toOwnedSlice();
 
     try std.json.stringify(snapshot, .{}, writer);
     try writer.writeByte(']');
