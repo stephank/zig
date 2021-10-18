@@ -78,6 +78,10 @@ const css_style: []const u8 =
     \\</style>
 ;
 
+const sect_height: usize = 50;
+const atom_height: usize = 20;
+const atom_padding: usize = 10;
+
 const SvgElement = struct {
     const Tag = enum {
         svg,
@@ -220,7 +224,7 @@ pub fn main() !void {
             svg_sect.css_class = "rect";
             svg_sect.y = if (last_svg_sect) |last| last.y + last.height else 0;
             svg_sect.width = svg_snap.width - 100;
-            svg_sect.height = 50;
+            svg_sect.height = sect_height;
             last_svg_sect = svg_sect;
             {
                 // <text> with section name
@@ -244,33 +248,58 @@ pub fn main() !void {
                 svg_atom.tag = .rect;
                 svg_atom.css_class = "rect";
                 svg_atom.x = svg_sect.x + 10;
-                svg_atom.y = if (last_svg_atom) |last| last.y + last.height else svg_sect.y + 30;
+                svg_atom.y = if (last_svg_atom) |last| last.y + last.height + atom_padding else svg_sect.y + 30 + atom_padding;
                 svg_atom.width = svg_sect.width - 20;
-                svg_atom.height = 20;
+                svg_atom.height = atom_height;
                 last_svg_atom = svg_atom;
 
                 var symbols = std.AutoHashMap(u64, Snapshot.Symtab.Symbol).init(arena);
                 for (snapshot.symtab.globals) |sym| {
-                    if (sym.address == node.address) continue;
                     if (node.address <= sym.address and sym.address < node.address + node.size) {
                         if (symbols.contains(sym.address)) continue;
                         try symbols.putNoClobber(sym.address, sym);
                     }
                 }
                 for (snapshot.symtab.locals) |sym| {
-                    if (sym.address == node.address) continue;
                     if (node.address <= sym.address and sym.address < node.address + node.size) {
                         if (symbols.contains(sym.address)) continue;
                         try symbols.putNoClobber(sym.address, sym);
                     }
                 }
 
-                var it = symbols.valueIterator();
-                while (it.next()) |sym| {
-                    _ = sym;
+                if (symbols.count() == 1) {
+                    const sym = symbols.get(node.address).?;
+                    // <text> with atom name
+                    const svg_atom_name = try svg_snap.newChild(arena);
+                    svg_atom_name.tag = .text;
+                    svg_atom_name.x = svg_atom.x + 10;
+                    svg_atom_name.y = svg_atom.y + 15;
+                    svg_atom_name.contents = sym.name;
+                } else {
+                    var last_svg_sym: ?*SvgElement = null;
+                    var it = symbols.valueIterator();
+                    while (it.next()) |sym| {
+                        // <rect> delmiting box
+                        const svg_sym = try svg_snap.newChild(arena);
+                        svg_sym.tag = .rect;
+                        svg_sym.css_class = "rect";
+                        svg_sym.x = svg_atom.x + 10;
+                        svg_sym.y = if (last_svg_sym) |last| last.y + last.height + atom_padding else svg_atom.y + atom_padding;
+                        svg_sym.width = svg_atom.width - 20;
+                        svg_sym.height = atom_height;
+                        last_svg_sym = svg_sym;
+                        // <text> with symbol name
+                        const svg_sym_name = try svg_snap.newChild(arena);
+                        svg_sym_name.tag = .text;
+                        svg_sym_name.x = svg_sym.x + 10;
+                        svg_sym_name.y = svg_sym.y + 15;
+                        svg_sym_name.contents = sym.name;
+
+                        svg_atom.height += svg_sym.height + atom_padding;
+                    }
                 }
 
-                svg_sect.height += svg_atom.height;
+                svg_sect.height += svg_atom.height + atom_padding;
             }
 
             svg_snap.height += svg_sect.height;
