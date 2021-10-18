@@ -64,6 +64,93 @@ const Snapshot = struct {
     resolver: []ResolverEntry,
 };
 
+const css_style: []const u8 =
+    \\<style>
+    \\  .rect {
+    \\    fill:none;
+    \\    stroke:black;
+    \\  }
+    \\  .snapshot-div {
+    \\    height:100%;
+    \\    width:100%;
+    \\    overflow:scroll;
+    \\  }
+    \\</style>
+;
+
+const SvgElement = struct {
+    const Tag = enum {
+        svg,
+        rect,
+        text,
+    };
+
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    css_class: ?[]const u8,
+    tag: Tag,
+    children: std.ArrayListUnmanaged(*SvgElement) = .{},
+    contents: ?[]const u8,
+
+    fn new(allocator: *Allocator) !*SvgElement {
+        const svg_el = try allocator.create(SvgElement);
+        svg_el.* = .{
+            .width = 0,
+            .height = 0,
+            .x = 0,
+            .y = 0,
+            .css_class = null,
+            .tag = .svg,
+            .contents = null,
+        };
+        return svg_el;
+    }
+
+    fn newChild(self: *SvgElement, allocator: *Allocator) !*SvgElement {
+        const child = try SvgElement.new(allocator);
+        errdefer allocator.destroy(child);
+        try self.children.append(allocator, child);
+        return child;
+    }
+
+    fn deinit(self: *SvgElement, allocator: *Allocator) void {
+        for (self.children.items) |child| {
+            child.deinit(allocator);
+            allocator.destroy(child);
+        }
+        self.children.deinit(allocator);
+    }
+
+    fn render(self: SvgElement, writer: anytype) @TypeOf(writer).Error!void {
+        switch (self.tag) {
+            .svg => try writer.writeAll("<svg "),
+            .rect => try writer.writeAll("<rect "),
+            .text => try writer.writeAll("<text "),
+        }
+        try writer.print("x='{d}' y='{d}' width='{d}' height='{d}' ", .{ self.x, self.y, self.width, self.height });
+        if (self.css_class) |class| {
+            try writer.print("class='{s}' ", .{class});
+        }
+        if (self.children.items.len == 0 and self.contents == null) {
+            return writer.writeAll("/>\n");
+        }
+        try writer.writeAll(">\n");
+        for (self.children.items) |child| {
+            try child.render(writer);
+        }
+        if (self.contents) |contents| {
+            try writer.writeAll(contents);
+        }
+        switch (self.tag) {
+            .svg => try writer.writeAll("</svg>\n"),
+            .rect => try writer.writeAll("</rect>\n"),
+            .text => try writer.writeAll("</text>\n"),
+        }
+    }
+};
+
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     const arena = &arena_allocator.allocator;
@@ -100,11 +187,16 @@ pub fn main() !void {
     try writer.writeAll("<html>\n");
     try writer.writeAll("<head></head>\n");
     try writer.writeAll("<body>\n");
+    try writer.writeAll(css_style);
 
     for (snapshots) |snapshot| {
-        try writer.writeAll("<svg width=\"100%\" height=\"100%\">\n");
-        var symtab = std.AutoHashMap(u64, std.ArrayList(Snapshot.Symtab.Symbol)).init(arena);
+        try writer.writeAll("<div class='snapshot-div'>\n");
 
+        const svg_snap = try SvgElement.new(arena);
+        svg_snap.width = 400;
+        svg_snap.height = 0;
+
+        var symtab = std.AutoHashMap(u64, std.ArrayList(Snapshot.Symtab.Symbol)).init(arena);
         for (snapshot.symtab.globals) |sym| {
             const res = try symtab.getOrPut(sym.address);
             if (!res.found_existing) {
@@ -120,38 +212,44 @@ pub fn main() !void {
             try res.value_ptr.append(sym);
         }
 
-        var snapshot_rect = Rect{
-            .width = 300,
-            .height = 0,
-            .x = 0,
-            .y = 0,
-            .address = 0,
-            .size = 0,
-        };
-
+        var last_svg_sect: ?*SvgElement = null;
         for (snapshot.sections) |section| {
-            const prev_rect = snapshot_rect.lastChild();
-            const sect_rect = try snapshot_rect.addChild(arena);
-            sect_rect.y = if (prev_rect) |pr| pr.y + pr.height else 0;
-            sect_rect.width = snapshot_rect.width;
-            sect_rect.height = 50;
-            sect_rect.address = section.address;
-            sect_rect.size = section.size;
-            sect_rect.name = section.name;
-            snapshot_rect.size += section.size;
+            // <rect> delimiting box
+            const svg_sect = try svg_snap.newChild(arena);
+            svg_sect.tag = .rect;
+            svg_sect.css_class = "rect";
+            svg_sect.y = if (last_svg_sect) |last| last.y + last.height else 0;
+            svg_sect.width = svg_snap.width - 100;
+            svg_sect.height = 50;
+            last_svg_sect = svg_sect;
+            {
+                // <text> with section name
+                const svg_sect_name = try svg_snap.newChild(arena);
+                svg_sect_name.tag = .text;
+                svg_sect_name.x = svg_sect.x + 10;
+                svg_sect_name.y = svg_sect.y + 20;
+                svg_sect_name.contents = section.name;
+                // <text> with start address
+                const svg_sect_addr = try svg_snap.newChild(arena);
+                svg_sect_addr.tag = .text;
+                svg_sect_addr.x = svg_snap.width - 100 + 5;
+                svg_sect_addr.y = svg_sect.y + 12;
+                svg_sect_addr.contents = try std.fmt.allocPrint(arena, "{x}", .{section.address});
+            }
 
+            var last_svg_atom: ?*SvgElement = null;
             for (section.nodes) |node| {
-                const prev_node_rect = sect_rect.lastChild();
-                const node_rect = try sect_rect.addChild(arena);
-                node_rect.x = sect_rect.x + 10;
-                node_rect.y = if (prev_node_rect) |pr| pr.y + 20 else sect_rect.y + 30;
-                node_rect.width = sect_rect.width - 20;
-                node_rect.height = 20;
-                node_rect.address = node.address;
-                node_rect.size = node.size;
+                // <rect> delimiting box
+                const svg_atom = try svg_snap.newChild(arena);
+                svg_atom.tag = .rect;
+                svg_atom.css_class = "rect";
+                svg_atom.x = svg_sect.x + 10;
+                svg_atom.y = if (last_svg_atom) |last| last.y + last.height else svg_sect.y + 30;
+                svg_atom.width = svg_sect.width - 20;
+                svg_atom.height = 20;
+                last_svg_atom = svg_atom;
 
                 var symbols = std.AutoHashMap(u64, Snapshot.Symtab.Symbol).init(arena);
-
                 for (snapshot.symtab.globals) |sym| {
                     if (sym.address == node.address) continue;
                     if (node.address <= sym.address and sym.address < node.address + node.size) {
@@ -172,16 +270,16 @@ pub fn main() !void {
                     _ = sym;
                 }
 
-                sect_rect.height += node_rect.height;
+                svg_sect.height += svg_atom.height;
             }
 
-            snapshot_rect.height += sect_rect.height;
+            svg_snap.height += svg_sect.height;
         }
 
-        try snapshot_rect.toHtml(writer);
-        try writer.writeAll("</svg>\n");
+        try svg_snap.render(writer);
     }
 
+    try writer.writeAll("</div>\n");
     try writer.writeAll("</body>\n");
     try writer.writeAll("</html>\n");
 }
@@ -190,58 +288,3 @@ fn usageAndExit(arg0: []const u8) noreturn {
     std.debug.warn("Usage: {s} <input_json_file>\n", .{arg0});
     std.process.exit(1);
 }
-
-const Rect = struct {
-    width: usize,
-    height: usize,
-    x: usize,
-    y: usize,
-    address: u64,
-    size: u64,
-    name: ?[]const u8 = null,
-    children: std.ArrayListUnmanaged(*Rect) = .{},
-
-    fn deinit(rect: *Rect, allocator: *Allocator) void {
-        for (rect.children.items) |child| {
-            child.deinit(allocator);
-            allocator.destroy(child);
-        }
-        rect.children.deinit(allocator);
-    }
-
-    fn addChild(rect: *Rect, allocator: *Allocator) !*Rect {
-        const child = try allocator.create(Rect);
-        errdefer allocator.destroy(child);
-        child.* = .{
-            .width = 0,
-            .height = 0,
-            .x = 0,
-            .y = 0,
-            .address = 0,
-            .size = 0,
-        };
-        try rect.children.append(allocator, child);
-        return child;
-    }
-
-    fn lastChild(rect: Rect) ?*Rect {
-        if (rect.children.items.len == 0) return null;
-        return rect.children.items[rect.children.items.len - 1];
-    }
-
-    fn toHtml(rect: Rect, writer: anytype) @TypeOf(writer).Error!void {
-        try writer.print("<rect width='{d}' height='{d}' x='{d}' y='{d}' fill='none' stroke='black' />\n", .{
-            rect.width,
-            rect.height,
-            rect.x,
-            rect.y,
-        });
-        if (rect.name) |name| {
-            try writer.print("<text x='{d}' y='{d}'>{s}</text>", .{ rect.x + 10, rect.y + 20, name });
-        }
-        try writer.print("<text x='{d}' y='{d}'>{x}</text>", .{ 305, rect.y + 12, rect.address });
-        for (rect.children.items) |child| {
-            try child.toHtml(writer);
-        }
-    }
-};
