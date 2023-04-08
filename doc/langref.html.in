@@ -7681,7 +7681,7 @@ test "global assembly" {
       {#header_open|@addrSpaceCast#}
       <pre>{#syntax#}@addrSpaceCast(comptime addrspace: std.builtin.AddressSpace, ptr: anytype) anytype{#endsyntax#}</pre>
       <p>
-      Converts a pointer from one address space to another. Depending on the current target and
+      Converts a pointer from one address space to another. Depending on the current and target
       address spaces, this cast may be a no-op, a complex operation, or illegal. If the cast is
       legal, then the resulting pointer points to the same memory location as the pointer operand.
       It is always valid to cast a pointer between the same address spaces.
